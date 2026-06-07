@@ -14,9 +14,10 @@ import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
- * Reference in-memory NotifyStore. Behaviorally spec-conformant for ADR 0022:
- * notifications created as {@code unread}; lifecycle machine enforced
- * ({@code dismissed} is terminal); shape validation on create.
+ * Reference in-memory NotifyStore. Behaviorally spec-conformant for ADR 0022 Option 2:
+ * recipient-scoped operations enforce existence non-disclosure (foreign caller →
+ * {@code NotFoundError}, indistinguishable from non-existent); ownership check precedes
+ * terminal-state check so the dismissed state is never leaked to a foreign caller.
  */
 public class InMemoryNotifyStore {
 
@@ -36,7 +37,7 @@ public class InMemoryNotifyStore {
     }
 
     /**
-     * Create a notification. Validates input, assigns id/timestamps/state,
+     * Create a notification. Validates input, assigns id/timestamps/state=unread,
      * and stores durably before returning.
      *
      * @return the {@code not_<32hex>} id
@@ -65,48 +66,81 @@ public class InMemoryNotifyStore {
     }
 
     /**
-     * Fetch a notification by id.
+     * Fetch a notification by id, optionally scoped to a recipient.
      *
-     * @throws NotFoundError if not found
+     * <p>When {@code recipientUsrId} is non-null the lookup is recipient-scoped:
+     * a foreign {@code recipientUsrId} returns the same {@link NotFoundError} as a
+     * genuinely non-existent id (existence non-disclosure, ADR 0022 Option 2).
+     *
+     * @param recipientUsrId authenticated caller; {@code null} disables scoping
+     * @throws NotFoundError if not found or if the caller is not the recipient
      */
-    public Notification getNotification(String id) {
+    public Notification getNotification(String recipientUsrId, String id) {
         Notification n = notifications.get(id);
         if (n == null) throw new NotFoundError(id);
+        if (recipientUsrId != null && !recipientUsrId.equals(n.recipientUsrId())) {
+            throw new NotFoundError(id);
+        }
         return n;
     }
 
     /**
      * Transition to {@code read} from {@code unread} or {@code read} (idempotent).
      *
-     * @throws NotFoundError      if not found
-     * @throws PreconditionError  if the notification is {@code dismissed}
+     * @param recipientUsrId authenticated caller; {@code null} disables scoping
+     * @throws NotFoundError     if not found or if the caller is not the recipient
+     * @throws PreconditionError if the notification is {@code dismissed}
      */
-    public void markRead(String id) {
-        transition(id, NotificationState.read);
+    public void markRead(String recipientUsrId, String id) {
+        transition(recipientUsrId, id, NotificationState.read);
     }
 
     /**
      * Transition to {@code unread} from {@code read} or {@code unread} (idempotent).
      *
-     * @throws NotFoundError      if not found
-     * @throws PreconditionError  if the notification is {@code dismissed}
+     * @param recipientUsrId authenticated caller; {@code null} disables scoping
+     * @throws NotFoundError     if not found or if the caller is not the recipient
+     * @throws PreconditionError if the notification is {@code dismissed}
      */
-    public void markUnread(String id) {
-        transition(id, NotificationState.unread);
+    public void markUnread(String recipientUsrId, String id) {
+        transition(recipientUsrId, id, NotificationState.unread);
     }
 
     /**
      * Terminate a notification as {@code dismissed}. Terminal — accepts no further transitions.
      *
-     * @throws NotFoundError      if not found
-     * @throws PreconditionError  if already {@code dismissed}
+     * <p>Ownership is checked BEFORE terminal-state: a foreign caller gets
+     * {@link NotFoundError}, not {@link PreconditionError}, even if the notification
+     * is already dismissed (existence non-disclosure, ADR 0022 §Errors).
+     *
+     * @param recipientUsrId authenticated caller; {@code null} disables scoping
+     * @throws NotFoundError     if not found or if the caller is not the recipient
+     * @throws PreconditionError if already {@code dismissed} (recipient callers only)
      */
-    public void dismiss(String id) {
-        transition(id, NotificationState.dismissed);
+    public void dismiss(String recipientUsrId, String id) {
+        transition(recipientUsrId, id, NotificationState.dismissed);
     }
 
-    private void transition(String id, NotificationState target) {
-        Notification n = getNotification(id);
+    /**
+     * Count unread notifications for a recipient.
+     *
+     * @param recipientUsrId the recipient's usr_id
+     * @return count of notifications in {@code unread} state owned by this recipient
+     */
+    public long countUnread(String recipientUsrId) {
+        return notifications.values().stream()
+                .filter(n -> recipientUsrId.equals(n.recipientUsrId())
+                        && n.state() == NotificationState.unread)
+                .count();
+    }
+
+    private void transition(String recipientUsrId, String id, NotificationState target) {
+        Notification n = notifications.get(id);
+        if (n == null) throw new NotFoundError(id);
+        // Ownership check BEFORE terminal-state (non-disclosure precedence: ADR 0022 §Errors)
+        if (recipientUsrId != null && !recipientUsrId.equals(n.recipientUsrId())) {
+            throw new NotFoundError(id);
+        }
         if (n.state() == NotificationState.dismissed) {
             throw new PreconditionError(
                     "Notification " + id + " is dismissed and accepts no further transitions");

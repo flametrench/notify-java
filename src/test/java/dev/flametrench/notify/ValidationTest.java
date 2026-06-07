@@ -3,6 +3,7 @@
 
 package dev.flametrench.notify;
 
+import dev.flametrench.ids.Id;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
@@ -195,11 +196,11 @@ class ValidationTest {
                 with(VALID_SCOPE, VALID_RECIPIENT, VALID_TYPE, VALID_SUBJECT, borderline)));
     }
 
-    // ── lifecycle: dismissed is terminal ──────────────────────────────────────
+    // ── lifecycle: dismissed is terminal (recipient caller) ───────────────────
 
     private String createAndDismiss(InMemoryNotifyStore store) {
         String id = store.createNotification(valid());
-        store.dismiss(id);
+        store.dismiss(null, id);
         return id;
     }
 
@@ -207,21 +208,74 @@ class ValidationTest {
     void markRead_after_dismiss_throws() {
         InMemoryNotifyStore store = new InMemoryNotifyStore();
         String id = createAndDismiss(store);
-        assertThrows(PreconditionError.class, () -> store.markRead(id));
+        assertThrows(PreconditionError.class, () -> store.markRead(null, id));
     }
 
     @Test
     void markUnread_after_dismiss_throws() {
         InMemoryNotifyStore store = new InMemoryNotifyStore();
         String id = createAndDismiss(store);
-        assertThrows(PreconditionError.class, () -> store.markUnread(id));
+        assertThrows(PreconditionError.class, () -> store.markUnread(null, id));
     }
 
     @Test
     void dismiss_after_dismiss_throws() {
         InMemoryNotifyStore store = new InMemoryNotifyStore();
         String id = createAndDismiss(store);
-        assertThrows(PreconditionError.class, () -> store.dismiss(id));
+        assertThrows(PreconditionError.class, () -> store.dismiss(null, id));
+    }
+
+    // ── recipient scoping (Option 2 IDOR guard) ───────────────────────────────
+
+    @Test
+    void get_by_intruder_returns_not_found() {
+        InMemoryNotifyStore store = new InMemoryNotifyStore();
+        String id = store.createNotification(valid());
+        String intruder = Id.generate("usr");
+        assertThrows(NotFoundError.class, () -> store.getNotification(intruder, id));
+    }
+
+    @Test
+    void get_by_nonexistent_and_foreign_both_not_found() {
+        InMemoryNotifyStore store = new InMemoryNotifyStore();
+        String id = store.createNotification(valid());
+        String intruder = Id.generate("usr");
+        // foreign id → NotFoundError
+        assertThrows(NotFoundError.class, () -> store.getNotification(intruder, id));
+        // genuinely non-existent → also NotFoundError
+        assertThrows(NotFoundError.class,
+                () -> store.getNotification(intruder, "not_0190f2a81b3c7abc8123ffffffffffff"));
+    }
+
+    @Test
+    void dismiss_foreign_already_dismissed_returns_not_found_not_precondition() {
+        InMemoryNotifyStore store = new InMemoryNotifyStore();
+        String id = store.createNotification(valid());
+        // recipient dismisses their own notification
+        store.dismiss(VALID_RECIPIENT, id);
+        // intruder tries to dismiss — MUST get NotFoundError (not PreconditionError)
+        String intruder = Id.generate("usr");
+        assertThrows(NotFoundError.class, () -> store.dismiss(intruder, id));
+    }
+
+    @Test
+    void get_by_recipient_succeeds() {
+        InMemoryNotifyStore store = new InMemoryNotifyStore();
+        String id = store.createNotification(valid());
+        assertDoesNotThrow(() -> store.getNotification(VALID_RECIPIENT, id));
+    }
+
+    // ── countUnread ───────────────────────────────────────────────────────────
+
+    @Test
+    void countUnread_reflects_state_changes() {
+        InMemoryNotifyStore store = new InMemoryNotifyStore();
+        store.createNotification(valid());
+        store.createNotification(valid());
+        assertEquals(2, store.countUnread(VALID_RECIPIENT));
+        String id3 = store.createNotification(valid());
+        store.markRead(null, id3);
+        assertEquals(2, store.countUnread(VALID_RECIPIENT));
     }
 
     // ── happy-path lifecycle ──────────────────────────────────────────────────
@@ -230,29 +284,29 @@ class ValidationTest {
     void create_sets_unread_state() {
         InMemoryNotifyStore store = new InMemoryNotifyStore();
         String id = store.createNotification(valid());
-        assertEquals(NotificationState.unread, store.getNotification(id).state());
+        assertEquals(NotificationState.unread, store.getNotification(null, id).state());
     }
 
     @Test
     void markRead_transitions_to_read() {
         InMemoryNotifyStore store = new InMemoryNotifyStore();
         String id = store.createNotification(valid());
-        store.markRead(id);
-        assertEquals(NotificationState.read, store.getNotification(id).state());
+        store.markRead(null, id);
+        assertEquals(NotificationState.read, store.getNotification(null, id).state());
     }
 
     @Test
     void markUnread_from_read_returns_to_unread() {
         InMemoryNotifyStore store = new InMemoryNotifyStore();
         String id = store.createNotification(valid());
-        store.markRead(id);
-        store.markUnread(id);
-        assertEquals(NotificationState.unread, store.getNotification(id).state());
+        store.markRead(null, id);
+        store.markUnread(null, id);
+        assertEquals(NotificationState.unread, store.getNotification(null, id).state());
     }
 
     @Test
     void getNotification_unknown_id_throws() {
         assertThrows(NotFoundError.class,
-                () -> new InMemoryNotifyStore().getNotification("not_000000000000000000000000000000ff"));
+                () -> new InMemoryNotifyStore().getNotification(null, "not_000000000000000000000000000000ff"));
     }
 }

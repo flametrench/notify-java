@@ -26,11 +26,14 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Flametrench v0.4 conformance suite — Java / JUnit 5 harness for the
- * notifications capability (ADR 0022).
+ * notifications capability (ADR 0022 Option 2: recipient-scoped).
  *
  * <p>Superset matching (result ⊇ expected): every key in the expected object
  * must appear and match in the actual result. Fields not listed in expected
  * (e.g. {@code created_at}, {@code state_changed_at}) are not checked.
+ *
+ * <p>Expected errors: when a step declares {@code "expected": {"error": "FooError"}},
+ * the harness asserts the op throws an exception whose simple class name matches.
  */
 class ConformanceTest {
 
@@ -132,19 +135,24 @@ class ConformanceTest {
                 yield Map.of("id", id);
             }
             case "get_notification" -> {
-                Notification n = store.getNotification((String) args.get("id"));
+                // recipient_usr_id is optional: null disables scoping (lifecycle tests),
+                // non-null enforces recipient scope (recipient-scope tests).
+                Notification n = store.getNotification(
+                        (String) args.get("recipient_usr_id"),
+                        (String) args.get("id")
+                );
                 yield notificationToMap(n);
             }
             case "mark_read" -> {
-                store.markRead((String) args.get("id"));
+                store.markRead((String) args.get("recipient_usr_id"), (String) args.get("id"));
                 yield null;
             }
             case "mark_unread" -> {
-                store.markUnread((String) args.get("id"));
+                store.markUnread((String) args.get("recipient_usr_id"), (String) args.get("id"));
                 yield null;
             }
             case "dismiss" -> {
-                store.dismiss((String) args.get("id"));
+                store.dismiss((String) args.get("recipient_usr_id"), (String) args.get("id"));
                 yield null;
             }
             default -> throw new IllegalStateException("Unknown fixture op: " + op);
@@ -183,27 +191,43 @@ class ConformanceTest {
                     jsonToPlain(step.get("input")), variables);
 
             JsonNode expected = step.get("expected");
-            if (expected != null && expected.has("error")) {
-                fail("Unexpected expected error in fixture: " + expected.get("error").asText());
+            boolean expectsError = expected != null && expected.has("error");
+            String expectedErrorName = expectsError ? expected.get("error").asText() : null;
+
+            Object result = null;
+            Exception thrown = null;
+            try {
+                result = invokeOp(store, op, resolvedInput);
+            } catch (Exception e) {
+                thrown = e;
             }
 
-            Object result = invokeOp(store, op, resolvedInput);
+            if (expectsError) {
+                assertNotNull(thrown,
+                        "Step " + op + ": expected " + expectedErrorName + " but no exception thrown");
+                assertEquals(expectedErrorName, thrown.getClass().getSimpleName(),
+                        "Step " + op + ": expected " + expectedErrorName
+                                + " but got " + thrown.getClass().getSimpleName());
+            } else {
+                if (thrown != null)
+                    throw new RuntimeException("Step " + op + ": unexpected exception", thrown);
+                if (expected != null && expected.has("result")) {
+                    Object expectedResult = resolveVars(jsonToPlain(expected.get("result")), variables);
+                    assertSuperset(result, expectedResult, "result");
+                }
 
-            if (expected != null && expected.has("result")) {
-                Object expectedResult = resolveVars(jsonToPlain(expected.get("result")), variables);
-                assertSuperset(result, expectedResult, "result");
-            }
-
-            JsonNode captures = step.get("captures");
-            if (captures != null) {
-                Iterator<Map.Entry<String, JsonNode>> it = captures.fields();
-                while (it.hasNext()) {
-                    Map.Entry<String, JsonNode> e = it.next();
-                    String capturePath = e.getValue().asText();
-                    Object captured = result instanceof Map<?, ?> map
-                            ? ((Map<?, ?>) map).get(capturePath)
-                            : result;
-                    variables.put(e.getKey(), captured);
+                // captures only on success
+                JsonNode captures = step.get("captures");
+                if (captures != null) {
+                    Iterator<Map.Entry<String, JsonNode>> it = captures.fields();
+                    while (it.hasNext()) {
+                        Map.Entry<String, JsonNode> e = it.next();
+                        String capturePath = e.getValue().asText();
+                        Object captured = result instanceof Map<?, ?> map
+                                ? ((Map<?, ?>) map).get(capturePath)
+                                : result;
+                        variables.put(e.getKey(), captured);
+                    }
                 }
             }
         }
@@ -225,5 +249,10 @@ class ConformanceTest {
     @TestFactory
     List<DynamicTest> lifecycleShape() throws IOException {
         return conformanceTests("notifications/lifecycle-shape.json");
+    }
+
+    @TestFactory
+    List<DynamicTest> recipientScope() throws IOException {
+        return conformanceTests("notifications/recipient-scope.json");
     }
 }
