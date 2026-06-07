@@ -1,0 +1,51 @@
+name: Publish to Maven Central
+
+# Publish order: ids-java@0.4.0 must be on Central before running this workflow.
+# Trigger sequence: ids publish → identity publish → (tenancy, authz, audit, notify, flags, file in parallel).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Git tag to publish (e.g. v0.4.0)'
+        required: true
+        default: 'v0.4.0'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout at tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.version }}
+
+      - name: Checkout flametrench/ids-java
+        uses: actions/checkout@v4
+        with:
+          repository: flametrench/ids-java
+          ref: v0.4.0
+          path: _vendored/ids-java
+
+      - name: Setup Java with GPG + Central credentials
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_TOKEN
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      - name: Install ids dep to local Maven repo
+        run: mvn --batch-mode -f _vendored/ids-java/pom.xml install -DskipTests
+
+      - name: Deploy to Maven Central
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: mvn --batch-mode clean deploy -P release
