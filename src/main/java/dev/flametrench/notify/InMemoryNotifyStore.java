@@ -3,6 +3,8 @@
 
 package dev.flametrench.notify;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.flametrench.ids.Id;
 
 import java.time.Clock;
@@ -19,6 +21,8 @@ import java.util.regex.Pattern;
 public class InMemoryNotifyStore {
 
     private static final Pattern TYPE_PATTERN = Pattern.compile("^[a-z0-9._-]{1,64}$");
+    private static final int DATA_MAX_BYTES = 16 * 1024; // 16 KB
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final Map<String, Notification> notifications = new LinkedHashMap<>();
     private final Clock clock;
@@ -129,6 +133,14 @@ public class InMemoryNotifyStore {
             throw new InvalidFormatError("subject");
         }
         if (input.data() == null) {
+            throw new InvalidFormatError("data");
+        }
+        try {
+            byte[] serialized = MAPPER.writeValueAsBytes(input.data());
+            if (serialized.length > DATA_MAX_BYTES) {
+                throw new InvalidFormatError("data");
+            }
+        } catch (JsonProcessingException e) {
             throw new InvalidFormatError("data");
         }
     }
